@@ -1,204 +1,127 @@
 const cheerio = require('cheerio');
 
-/**
- * Извлекает расписание из HTML-страницы s.kubsau.ru
- * @param {string} html - HTML-код страницы
- * @param {string} groupName - Номер группы (например, "ПИ2403")
- * @returns {object} - Объект с расписанием
- */
 function parseSchedule(html, groupName) {
     const $ = cheerio.load(html);
-
-    // --- 1. Получение базовой информации ---
-    const group = $('h2 strong').first().text().trim() || groupName;
-
-    let fetchedAt = '';
-    const updateMatch = html.match(/Дата обновления:\s*([\d\-:\s]+)/);
-    if (updateMatch) {
-        fetchedAt = updateMatch[1].trim();
-    } else {
-        fetchedAt = new Date().toISOString();
-    }
+    
+    // Получаем весь текст и разбиваем на строки для надежности парсинга Markdown-таблиц
+    const bodyText = $('body').text();
+    const lines = bodyText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
 
     const result = {
-        group,
-        fetched_at: fetchedAt,
+        group: groupName,
+        fetched_at: new Date().toISOString(),
         weeks: []
     };
 
-    // --- 2. Функция парсинга одного дня (карточки .card-block) ---
-    function parseDay(dayElement) {
-        const $day = $(dayElement);
-        // Извлекаем дату из класса day-YYYY-MM-DD
-        const classNames = $day.attr('class') || '';
-        const dateMatch = classNames.match(/day-(\d{4}-\d{2}-\d{2})/);
-        const date = dateMatch ? dateMatch[1] : '';
+    let currentWeek = null;
+    let currentDay = null;
 
-        // Заголовок дня (пример: "Понедельник | 30 марта")
-        const titleText = $day.find('.card-title').first().text().trim();
-        let weekday = '';
-        if (titleText) {
-            weekday = titleText.split('|')[0].trim();
+    const DAYS_NAMES = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
+    
+    // Интервалы пар
+    const PAIR_TIMES = [
+        { start: "08:00", end: "09:30" }, { start: "09:45", end: "11:15" },
+        { start: "11:30", end: "13:00" }, { start: "13:50", end: "15:20" },
+        { start: "15:35", end: "17:05" }, { start: "17:20", end: "18:50" },
+        { start: "13:15", end: "14:45" }, { start: "15:00", end: "16:30" }, { start: "16:45", end: "18:15" }
+    ];
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        // 1. Неделя
+        if (line.includes('Первая неделя')) {
+            if (currentWeek && currentWeek.days.length > 0) result.weeks.push(currentWeek);
+            currentWeek = { week_name: "Первая неделя", week_id: "first", days: [] };
+            currentDay = null;
+            continue;
+        }
+        if (line.includes('Вторая неделя')) {
+            if (currentWeek && currentWeek.days.length > 0) result.weeks.push(currentWeek);
+            currentWeek = { week_name: "Вторая неделя", week_id: "second", days: [] };
+            currentDay = null;
+            continue;
+        }
+        if (!currentWeek) continue;
+
+        // 2. День
+        let foundDayName = null;
+        for (const day of DAYS_NAMES) {
+            if (line.startsWith(day)) {
+                foundDayName = day;
+                break;
+            }
         }
 
-        // Таблица с парами
-        const pairs = [];
-        const rows = $day.find('table.table tbody tr');
+        if (foundDayName) {
+            if (currentDay && currentDay.pairs.length > 0) currentWeek.days.push(currentDay);
+            currentDay = { date: "", weekday: foundDayName, title: line, pairs: [] };
+            continue;
+        }
 
-        rows.each((idx, row) => {
-            const $row = $(row);
-            const timeCell = $row.find('td.time').first();
-            const dissCell = $row.find('td.diss').first();
-            const roomCell = $row.find('td.who-where').first();
+        // 3. Пара
+        if (currentDay && line.startsWith('|') && /\d{2}:\d{2}/.test(line)) {
+            const columns = line.split('|').map(col => col.trim()).filter(col => col !== '');
+            
+            if (columns.length >= 2) {
+                const timeCell = columns[0];
+                const subjectCell = columns[1] || "";
+                const roomCell = columns[2] || "";
 
-            // Проверяем, есть ли предмет (не пустая ячейка)
-            const hasSubject = dissCell.text().trim().length > 0;
-            if (!hasSubject) return; // пропускаем пустые пары
+                const startTimeMatch = timeCell.match(/(\d{2}:\d{2})/);
+                
+                if (startTimeMatch) {
+                    const startTime = startTimeMatch[1];
+                    const pairTimeObj = PAIR_TIMES.find(p => p.start === startTime);
+                    
+                    if (pairTimeObj) {
+                        let fullText = subjectCell.replace(/\s+/g, ' ').trim();
+                        
+                        // Эвристика определения типа занятия
+                        let type = 'lecture'; // По умолчанию лекция
+                        let subjectName = fullText;
+                        let teachers = [];
 
-            // --- Время ---
-            const timeHtml = timeCell.html() || '';
-            const times = timeHtml.split('<br>').map(t => t.trim());
-            let startTime = '', endTime = '';
-            if (times.length >= 2) {
-                startTime = times[0];
-                endTime = times[1];
-            } else {
-                // fallback: парсим числа из текста
-                const timeText = timeCell.text().trim();
-                const match = timeText.match(/(\d{2}:\d{2})\s+(\d{2}:\d{2})/);
-                if (match) {
-                    startTime = match[1];
-                    endTime = match[2];
+                        const teacherPatternIndex = fullText.search(/ПИ\d{4}\/\d/);
+                        
+                        if (teacherPatternIndex !== -1) {
+                            subjectName = fullText.substring(0, teacherPatternIndex).trim();
+                            const teachersPart = fullText.substring(teacherPatternIndex);
+                            teachers = teachersPart.split(',').map(t => t.trim()).filter(t => t.length > 0);
+                            
+                            // Логика определения типа:
+                            // Если преподавателей больше 1 ИЛИ в названии есть "Практика"/"Семинар"/"Лабораторная"
+                            if (teachers.length > 1 || /Практика|Семинар|Лабораторная|Лаб\. работа/i.test(subjectName)) {
+                                type = 'seminar';
+                            }
+                        } else {
+                            // Если нет явного указания группы, проверяем название
+                            if (/Практика|Семинар|Лабораторная/i.test(subjectName)) {
+                                type = 'seminar';
+                            }
+                        }
+
+                        let cleanRoom = roomCell.replace(/\(\/.*?\)/g, '').trim();
+                        const rooms = cleanRoom ? cleanRoom.split(/\s+/).filter(r => r.length > 0) : [];
+
+                        currentDay.pairs.push({
+                            time_range: `${pairTimeObj.start} ${pairTimeObj.end}`,
+                            start_time: pairTimeObj.start,
+                            end_time: pairTimeObj.end,
+                            subject: subjectName || "Нет предмета",
+                            teachers: teachers,
+                            rooms: rooms,
+                            has_lesson: !!subjectName,
+                            type: type // 'lecture' или 'seminar'
+                        });
+                    }
                 }
-            }
-
-            // --- Предмет и преподаватели ---
-            // Копируем содержимое .diss, удаляем из копии все .diss-info,
-            // чтобы получить чистое название предмета
-            const dissClone = dissCell.clone();
-            dissClone.find('.diss-info').remove();
-            let subject = dissClone.text().trim().replace(/\s+/g, ' ');
-            // Если после удаления осталось пусто, возможно предмет в <strong> и .diss-info
-            if (subject === '') {
-                subject = dissCell.find('strong').first().text().trim();
-            }
-            if (subject === '') {
-                subject = dissCell.text().trim().replace(/\s+/g, ' ');
-            }
-
-            // Преподаватели: собираем текст из всех .diss-info
-            const teachers = [];
-            dissCell.find('.diss-info').each((i, el) => {
-                let teacherText = $(el).text().trim().replace(/\s+/g, ' ');
-                if (teacherText) {
-                    // Разбиваем по запятым, если внутри несколько преподавателей
-                    const parts = teacherText.split(',').map(p => p.trim());
-                    parts.forEach(p => {
-                        if (p) teachers.push(p);
-                    });
-                }
-            });
-            // Убираем дубликаты (иногда один преподаватель может попасть дважды)
-            const uniqueTeachers = [...new Map(teachers.map(t => [t, t])).values()];
-
-            // --- Аудитории ---
-            const rooms = [];
-            roomCell.find('a.room-link').each((i, el) => {
-                const room = $(el).text().trim();
-                if (room) rooms.push(room);
-            });
-            // Если ссылок нет, возможно аудитория записана простым текстом
-            if (rooms.length === 0) {
-                const roomText = roomCell.text().trim();
-                if (roomText) {
-                    // Может быть несколько аудиторий через пробел
-                    const splitRooms = roomText.split(/\s+/);
-                    splitRooms.forEach(r => { if (r) rooms.push(r); });
-                }
-            }
-
-            // --- Формируем объект пары ---
-            pairs.push({
-                time_range: `${startTime} ${endTime}`,
-                start_time: startTime,
-                end_time: endTime,
-                subject: subject || 'Без названия',
-                teachers: uniqueTeachers,
-                rooms: rooms,
-                has_lesson: true
-            });
-        });
-
-        return {
-            date,
-            weekday,
-            title: titleText,
-            pairs
-        };
-    }
-
-    // --- 3. Парсинг вкладок первой и второй недели ---
-    const firstTab = $('#first');
-    const secondTab = $('#second');
-
-    if (firstTab.length) {
-        const firstWeekDiv = firstTab.find('.schedule-first-week');
-        if (firstWeekDiv.length) {
-            const days = [];
-            firstWeekDiv.find('.card-block').each((i, el) => {
-                const dayData = parseDay(el);
-                if (dayData.pairs.length > 0) {
-                    days.push(dayData);
-                }
-            });
-            if (days.length) {
-                result.weeks.push({
-                    week_name: 'Первая неделя',
-                    week_id: 'first',
-                    days
-                });
             }
         }
     }
 
-    if (secondTab.length) {
-        const secondWeekDiv = secondTab.find('.schedule-second-week');
-        if (secondWeekDiv.length) {
-            const days = [];
-            secondWeekDiv.find('.card-block').each((i, el) => {
-                const dayData = parseDay(el);
-                if (dayData.pairs.length > 0) {
-                    days.push(dayData);
-                }
-            });
-            if (days.length) {
-                result.weeks.push({
-                    week_name: 'Вторая неделя',
-                    week_id: 'second',
-                    days
-                });
-            }
-        }
-    }
-
-    // --- 4. Fallback: если не нашли табы, пробуем спарсить из .fast-schedule (только три дня) ---
-    if (result.weeks.length === 0) {
-        const fastDays = $('.fast-schedule .card-block');
-        if (fastDays.length) {
-            const days = [];
-            fastDays.each((i, el) => {
-                const dayData = parseDay(el);
-                if (dayData.pairs.length) days.push(dayData);
-            });
-            if (days.length) {
-                result.weeks.push({
-                    week_name: 'Текущая неделя',
-                    week_id: 'current',
-                    days
-                });
-            }
-        }
-    }
+    if (currentDay && currentDay.pairs.length > 0) currentWeek.days.push(currentDay);
+    if (currentWeek && currentWeek.days.length > 0) result.weeks.push(currentWeek);
 
     return result;
 }
