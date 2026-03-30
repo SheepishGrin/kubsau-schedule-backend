@@ -74,7 +74,7 @@ function parseSchedule(html, groupName) {
             // В исходном HTML у лекций класс "lection", у семинаров – "lection yes"
             const lectionClasses = $lectionCell.attr('class') || '';
             const isSeminar = lectionClasses.includes('yes');
-            const type = ! isSeminar ? 'seminar' : 'lecture';
+            const type = !isSeminar ? 'seminar' : 'lecture';
 
             // --- Предмет и преподаватели ---
             // Копируем ячейку, удаляем вложенные .diss-info, чтобы получить чистое название предмета
@@ -146,7 +146,7 @@ function parseSchedule(html, groupName) {
             const days = [];
             $firstWeek.find('.card-block').each((i, el) => {
                 const dayData = parseDay(el);
-                if (dayData.pairs.length) days.push(dayData);
+                days.push(dayData);   // всегда добавляем день, даже если пар нет (выходной)
             });
             if (days.length) {
                 result.weeks.push({
@@ -164,7 +164,7 @@ function parseSchedule(html, groupName) {
             const days = [];
             $secondWeek.find('.card-block').each((i, el) => {
                 const dayData = parseDay(el);
-                if (dayData.pairs.length) days.push(dayData);
+                days.push(dayData);
             });
             if (days.length) {
                 result.weeks.push({
@@ -183,7 +183,7 @@ function parseSchedule(html, groupName) {
             const days = [];
             $fastDays.each((i, el) => {
                 const dayData = parseDay(el);
-                if (dayData.pairs.length) days.push(dayData);
+                days.push(dayData);
             });
             if (days.length) {
                 result.weeks.push({
