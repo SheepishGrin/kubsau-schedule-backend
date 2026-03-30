@@ -32,11 +32,11 @@ function parseSchedule(html, groupName) {
         // 1. Пробуем определить по классу
         const lectionClasses = $lectionCell.attr('class') || '';
         if (lectionClasses.includes('yes')) {
-            return 'seminar';   // класс "lection yes" → семинар/практика
+            return 'lecture';   // класс "lection yes" → семинар/практика
         }
         if (lectionClasses.includes('lection')) {
             // Если есть класс "lection" без "yes" – это лекция
-            return 'lecture';
+            return 'seminar';
         }
         
         // 2. Fallback: проверяем текст в ячейке
