@@ -27,6 +27,31 @@ function parseSchedule(html, groupName) {
         weeks: []
     };
 
+    // Функция определения типа занятия (лекция или семинар/практика)
+    function detectLessonType($lectionCell) {
+        // 1. Пробуем определить по классу
+        const lectionClasses = $lectionCell.attr('class') || '';
+        if (lectionClasses.includes('yes')) {
+            return 'seminar';   // класс "lection yes" → семинар/практика
+        }
+        if (lectionClasses.includes('lection')) {
+            // Если есть класс "lection" без "yes" – это лекция
+            return 'lecture';
+        }
+        
+        // 2. Fallback: проверяем текст в ячейке
+        const lectionText = $lectionCell.text().toLowerCase();
+        if (lectionText.includes('практик') || 
+            lectionText.includes('семинар') || 
+            lectionText.includes('лаб') ||
+            lectionText.includes('лабораторная')) {
+            return 'seminar';
+        }
+        
+        // 3. По умолчанию считаем лекцией
+        return 'lecture';
+    }
+
     // Функция парсинга одного дня (блок .card-block)
     function parseDay(dayElement) {
         const $day = $(dayElement);
@@ -46,7 +71,7 @@ function parseSchedule(html, groupName) {
         rows.each((idx, row) => {
             const $row = $(row);
             const $timeCell = $row.find('td.time');
-            const $lectionCell = $row.find('td.lection');   // тут тип занятия
+            const $lectionCell = $row.find('td.lection');   // ячейка с типом занятия
             const $dissCell = $row.find('td.diss');
             const $whereCell = $row.find('td.who-where');
 
@@ -71,11 +96,7 @@ function parseSchedule(html, groupName) {
             }
 
             // --- Тип занятия (лекция или семинар/практика) ---
-            // В исходном HTML у лекций класс "lection", у семинаров – "lection yes"
-            const lectionClasses = $lectionCell.attr('class') || '';
-            const isSeminar = lectionClasses.includes('yes');
-            // ИСПРАВЛЕНО: если есть 'yes' → семинар, иначе лекция
-            const type = isSeminar ? 'seminar' : 'lecture';
+            const type = detectLessonType($lectionCell);
 
             // --- Предмет и преподаватели ---
             // Копируем ячейку, удаляем вложенные .diss-info, чтобы получить чистое название предмета
@@ -125,7 +146,7 @@ function parseSchedule(html, groupName) {
                 teachers: teachers,
                 rooms: rooms,
                 has_lesson: true,
-                type: type
+                type: type   // <-- ГАРАНТИРОВАННО добавляем тип
             });
         });
 
