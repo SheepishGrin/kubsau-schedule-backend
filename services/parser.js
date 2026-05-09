@@ -1,17 +1,18 @@
 const cheerio = require('cheerio');
 
 /**
- * Извлекает расписание из HTML-страницы s.kubsau.ru
+ * Парсит расписание из HTML-страницы s.kubsau.ru
  * @param {string} html - HTML-код страницы
  * @param {string} groupName - Номер группы (например, "ПИ2403")
- * @returns {object} - Объект с расписанием
+ * @returns {object} - Структурированное расписание
  */
 function parseSchedule(html, groupName) {
     const $ = cheerio.load(html);
 
-    // --- 1. Получение базовой информации ---
+    // Определяем группу (берём из заголовка)
     const group = $('h2 strong').first().text().trim() || groupName;
 
+    // Дата обновления
     let fetchedAt = '';
     const updateMatch = html.match(/Дата обновления:\s*([\d\-:\s]+)/);
     if (updateMatch) {
@@ -26,45 +27,67 @@ function parseSchedule(html, groupName) {
         weeks: []
     };
 
-    // --- 2. Функция парсинга одного дня (карточки .card-block) ---
+    // Функция определения типа занятия (лекция или семинар/практика)
+    function detectLessonType($lectionCell) {
+        // 1. Пробуем определить по классу
+        const lectionClasses = $lectionCell.attr('class') || '';
+        if (lectionClasses.includes('yes')) {
+            return 'seminar';   // класс "lection yes" → семинар/практика
+        }
+        if (lectionClasses.includes('lection')) {
+            // Если есть класс "lection" без "yes" – это лекция
+            return 'lecture';
+        }
+        
+        // 2. Fallback: проверяем текст в ячейке
+        const lectionText = $lectionCell.text().toLowerCase();
+        if (lectionText.includes('практик') || 
+            lectionText.includes('семинар') || 
+            lectionText.includes('лаб') ||
+            lectionText.includes('лабораторная')) {
+            return 'seminar';
+        }
+        
+        // 3. По умолчанию считаем лекцией
+        return 'lecture';
+    }
+
+    // Функция парсинга одного дня (блок .card-block)
     function parseDay(dayElement) {
         const $day = $(dayElement);
-        // Извлекаем дату из класса day-YYYY-MM-DD
+        
+        // Дата из класса day-YYYY-MM-DD
         const classNames = $day.attr('class') || '';
         const dateMatch = classNames.match(/day-(\d{4}-\d{2}-\d{2})/);
         const date = dateMatch ? dateMatch[1] : '';
 
-        // Заголовок дня (пример: "Понедельник | 30 марта")
+        // Заголовок дня (например, "Понедельник | 30 марта")
         const titleText = $day.find('.card-title').first().text().trim();
-        let weekday = '';
-        if (titleText) {
-            weekday = titleText.split('|')[0].trim();
-        }
+        let weekday = titleText.split('|')[0].trim();
 
-        // Таблица с парами
         const pairs = [];
         const rows = $day.find('table.table tbody tr');
 
         rows.each((idx, row) => {
             const $row = $(row);
-            const timeCell = $row.find('td.time').first();
-            const dissCell = $row.find('td.diss').first();
-            const roomCell = $row.find('td.who-where').first();
+            const $timeCell = $row.find('td.time');
+            const $lectionCell = $row.find('td.lection');   // ячейка с типом занятия
+            const $dissCell = $row.find('td.diss');
+            const $whereCell = $row.find('td.who-where');
 
-            // Проверяем, есть ли предмет (не пустая ячейка)
-            const hasSubject = dissCell.text().trim().length > 0;
-            if (!hasSubject) return; // пропускаем пустые пары
+            // Есть ли предмет (не пустая ячейка diss)
+            const hasSubject = $dissCell.text().trim().length > 0;
+            if (!hasSubject) return; // пропускаем пустые строки
 
             // --- Время ---
-            const timeHtml = timeCell.html() || '';
+            const timeHtml = $timeCell.html() || '';
             const times = timeHtml.split('<br>').map(t => t.trim());
             let startTime = '', endTime = '';
             if (times.length >= 2) {
                 startTime = times[0];
                 endTime = times[1];
             } else {
-                // fallback: парсим числа из текста
-                const timeText = timeCell.text().trim();
+                const timeText = $timeCell.text().trim();
                 const match = timeText.match(/(\d{2}:\d{2})\s+(\d{2}:\d{2})/);
                 if (match) {
                     startTime = match[1];
@@ -72,60 +95,58 @@ function parseSchedule(html, groupName) {
                 }
             }
 
+            // --- Тип занятия (лекция или семинар/практика) ---
+            const type = detectLessonType($lectionCell);
+
             // --- Предмет и преподаватели ---
-            // Копируем содержимое .diss, удаляем из копии все .diss-info,
-            // чтобы получить чистое название предмета
-            const dissClone = dissCell.clone();
-            dissClone.find('.diss-info').remove();
-            let subject = dissClone.text().trim().replace(/\s+/g, ' ');
-            // Если после удаления осталось пусто, возможно предмет в <strong> и .diss-info
-            if (subject === '') {
-                subject = dissCell.find('strong').first().text().trim();
+            // Копируем ячейку, удаляем вложенные .diss-info, чтобы получить чистое название предмета
+            const $dissClone = $dissCell.clone();
+            $dissClone.find('.diss-info').remove();
+            let subject = $dissClone.text().trim().replace(/\s+/g, ' ');
+            if (!subject) {
+                // fallback: возможно предмет в <strong>
+                subject = $dissCell.find('strong').first().text().trim();
             }
-            if (subject === '') {
-                subject = dissCell.text().trim().replace(/\s+/g, ' ');
+            if (!subject) {
+                subject = $dissCell.text().trim().replace(/\s+/g, ' ');
             }
 
-            // Преподаватели: собираем текст из всех .diss-info
+            // Преподаватели: собираем из всех .diss-info
             const teachers = [];
-            dissCell.find('.diss-info').each((i, el) => {
+            $dissCell.find('.diss-info').each((i, el) => {
                 let teacherText = $(el).text().trim().replace(/\s+/g, ' ');
                 if (teacherText) {
-                    // Разбиваем по запятым, если внутри несколько преподавателей
+                    // Внутри может быть несколько через запятую
                     const parts = teacherText.split(',').map(p => p.trim());
                     parts.forEach(p => {
-                        if (p) teachers.push(p);
+                        if (p && !teachers.includes(p)) teachers.push(p);
                     });
                 }
             });
-            // Убираем дубликаты (иногда один преподаватель может попасть дважды)
-            const uniqueTeachers = [...new Map(teachers.map(t => [t, t])).values()];
 
             // --- Аудитории ---
             const rooms = [];
-            roomCell.find('a.room-link').each((i, el) => {
+            $whereCell.find('a.room-link').each((i, el) => {
                 const room = $(el).text().trim();
                 if (room) rooms.push(room);
             });
-            // Если ссылок нет, возможно аудитория записана простым текстом
             if (rooms.length === 0) {
-                const roomText = roomCell.text().trim();
+                const roomText = $whereCell.text().trim();
                 if (roomText) {
-                    // Может быть несколько аудиторий через пробел
                     const splitRooms = roomText.split(/\s+/);
                     splitRooms.forEach(r => { if (r) rooms.push(r); });
                 }
             }
 
-            // --- Формируем объект пары ---
             pairs.push({
                 time_range: `${startTime} ${endTime}`,
                 start_time: startTime,
                 end_time: endTime,
                 subject: subject || 'Без названия',
-                teachers: uniqueTeachers,
+                teachers: teachers,
                 rooms: rooms,
-                has_lesson: true
+                has_lesson: true,
+                type: type   // <-- ГАРАНТИРОВАННО добавляем тип
             });
         });
 
@@ -137,19 +158,17 @@ function parseSchedule(html, groupName) {
         };
     }
 
-    // --- 3. Парсинг вкладок первой и второй недели ---
-    const firstTab = $('#first');
-    const secondTab = $('#second');
+    // --- Парсинг первой и второй недель ---
+    const $firstTab = $('#first');
+    const $secondTab = $('#second');
 
-    if (firstTab.length) {
-        const firstWeekDiv = firstTab.find('.schedule-first-week');
-        if (firstWeekDiv.length) {
+    if ($firstTab.length) {
+        const $firstWeek = $firstTab.find('.schedule-first-week');
+        if ($firstWeek.length) {
             const days = [];
-            firstWeekDiv.find('.card-block').each((i, el) => {
+            $firstWeek.find('.card-block').each((i, el) => {
                 const dayData = parseDay(el);
-                if (dayData.pairs.length > 0) {
-                    days.push(dayData);
-                }
+                days.push(dayData);
             });
             if (days.length) {
                 result.weeks.push({
@@ -161,15 +180,13 @@ function parseSchedule(html, groupName) {
         }
     }
 
-    if (secondTab.length) {
-        const secondWeekDiv = secondTab.find('.schedule-second-week');
-        if (secondWeekDiv.length) {
+    if ($secondTab.length) {
+        const $secondWeek = $secondTab.find('.schedule-second-week');
+        if ($secondWeek.length) {
             const days = [];
-            secondWeekDiv.find('.card-block').each((i, el) => {
+            $secondWeek.find('.card-block').each((i, el) => {
                 const dayData = parseDay(el);
-                if (dayData.pairs.length > 0) {
-                    days.push(dayData);
-                }
+                days.push(dayData);
             });
             if (days.length) {
                 result.weeks.push({
@@ -181,14 +198,14 @@ function parseSchedule(html, groupName) {
         }
     }
 
-    // --- 4. Fallback: если не нашли табы, пробуем спарсить из .fast-schedule (только три дня) ---
+    // Fallback: если не нашли вкладки, пытаемся взять быстрый блок (первые три дня текущей недели)
     if (result.weeks.length === 0) {
-        const fastDays = $('.fast-schedule .card-block');
-        if (fastDays.length) {
+        const $fastDays = $('.fast-schedule .card-block');
+        if ($fastDays.length) {
             const days = [];
-            fastDays.each((i, el) => {
+            $fastDays.each((i, el) => {
                 const dayData = parseDay(el);
-                if (dayData.pairs.length) days.push(dayData);
+                days.push(dayData);
             });
             if (days.length) {
                 result.weeks.push({
